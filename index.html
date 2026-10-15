@@ -507,7 +507,105 @@ function saveUser(u){if(!sbUser)return;const pref=profilePrefs();write(prefKey()
 function textNode(t){return document.createTextNode(String(t??''))}function el(tag,cls,txt){const x=document.createElement(tag);if(cls)x.className=cls;if(txt!==undefined)x.append(textNode(txt));return x}
 function showAuth(which){$('signup').classList.toggle('hidden',which!=='signup');$('login').classList.toggle('hidden',which!=='login');$('app').classList.add('hidden')}
 $('show-login').onclick=()=>showAuth('login');$('show-signup').onclick=()=>showAuth('signup');
-$('signup-btn').onclick=async()=>{const name=$('su-name').value.trim(),email=$('su-email').value.trim().toLowerCase(),pass=$('su-pass').value,confirm=$('su-confirm').value,err=$('signup-error'),btn=$('signup-btn');err.textContent='';if(!name||!email||!pass||!confirm){err.textContent='Please complete all fields.';return}if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){err.textContent='Enter a valid email.';return}if(pass.length<6){err.textContent='Password must have at least 6 characters.';return}if(pass!==confirm){err.textContent='Passwords do not match.';return}btn.disabled=true;btn.textContent='Creating account…';try{const avatar=avatars[Math.floor(Math.random()*avatars.length)];const {data,error}=await sb.auth.signUp({email,password:pass,options:{data:{username:name,avatar}}});if(error)throw error;if(!data.session){err.textContent='Account created. Please check your email before signing in.';showAuth('login');$('li-name').value=email;return}sbUser=data.user;const profile=await sb.from('profiles').upsert({id:sbUser.id,username:name,display_name:name,avatar},{onConflict:'id'}).select().single();if(profile.error)throw profile.error;currentProfile=profile.data;current=name;await enterApp(data.session)}catch(e){console.error(e);const msg=(e?.message||'').toLowerCase();err.textContent=msg.includes('already registered')?'This email is already registered.':msg.includes('duplicate')||msg.includes('database error')?'That username may already be in use. Try another one.':(e?.message||'Could not create account.')}finally{btn.disabled=false;btn.textContent='Sign Up'}};
+$('signup-btn').onclick=async()=>{
+  const name=$('su-name').value.trim(),
+        email=$('su-email').value.trim().toLowerCase(),
+        pass=$('su-pass').value,
+        confirm=$('su-confirm').value,
+        err=$('signup-error'),
+        btn=$('signup-btn');
+
+  err.textContent='';
+  if(!name||!email||!pass||!confirm){err.textContent='Please complete all fields.';return}
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){err.textContent='Enter a valid email.';return}
+  if(pass.length<6){err.textContent='Password must have at least 6 characters.';return}
+  if(pass!==confirm){err.textContent='Passwords do not match.';return}
+
+  btn.disabled=true;
+  btn.textContent='Creating account…';
+
+  try{
+    // Keep Auth metadata deliberately small. The database trigger creates
+    // the matching public.profiles row from the username.
+    const {data,error}=await sb.auth.signUp({
+      email,
+      password:pass,
+      options:{data:{username:name}}
+    });
+
+    if(error)throw error;
+    if(!data?.user)throw new Error('Supabase did not return a new user.');
+
+    // Confirm email is currently disabled, so a session should normally
+    // be returned immediately. If that setting changes later, fall back
+    // cleanly to the login screen.
+    if(!data.session){
+      $('li-name').value=email;
+      $('li-pass').value='';
+      showAuth('login');
+      $('login-error').textContent='Account created. Please confirm your email, then log in.';
+      return;
+    }
+
+    sbUser=data.user;
+
+    // The SQL trigger should already have created this row. Fetch it first
+    // instead of immediately racing it with another insert/upsert.
+    let {data:profile,error:profileReadError}=await sb
+      .from('profiles')
+      .select('*')
+      .eq('id',sbUser.id)
+      .maybeSingle();
+
+    if(profileReadError)throw profileReadError;
+
+    // Safety fallback only if the trigger did not create the row.
+    if(!profile){
+      const avatar=avatars[Math.floor(Math.random()*avatars.length)];
+      const created=await sb.from('profiles')
+        .insert({id:sbUser.id,username:name,display_name:name,avatar})
+        .select()
+        .single();
+      if(created.error)throw created.error;
+      profile=created.data;
+    }else if(!profile.avatar){
+      const avatar=avatars[Math.floor(Math.random()*avatars.length)];
+      const updated=await sb.from('profiles')
+        .update({avatar,username:name,display_name:name})
+        .eq('id',sbUser.id)
+        .select()
+        .single();
+      if(updated.error)throw updated.error;
+      profile=updated.data;
+    }
+
+    currentProfile=profile;
+    current=profile.username||name;
+    await enterApp(data.session);
+
+  }catch(e){
+    console.error('Echo Hollow sign-up failed:',e);
+    const msg=(e?.message||'').toLowerCase();
+
+    if(msg.includes('already registered')||msg.includes('user already registered')){
+      err.textContent='This email is already registered. Try logging in.';
+    }else if(msg.includes('rate limit')||msg.includes('too many requests')){
+      err.textContent='Too many sign-up attempts. Please wait a little and try again.';
+    }else if(msg.includes('database error')||msg.includes('saving new user')){
+      err.textContent='Account could not be created in the database. Please try again.';
+    }else if(msg.includes('duplicate')||msg.includes('unique')){
+      err.textContent='That username is already in use. Try another one.';
+    }else if(msg.includes('password')){
+      err.textContent=e.message||'Please choose a different password.';
+    }else{
+      // During testing, show the actual Supabase message instead of hiding it.
+      err.textContent=e?.message||'Could not create account.';
+    }
+  }finally{
+    btn.disabled=false;
+    btn.textContent='Sign Up';
+  }
+};
 $('login-btn').onclick=async()=>{const email=$('li-name').value.trim().toLowerCase(),pass=$('li-pass').value,err=$('login-error'),btn=$('login-btn');err.textContent='';if(!email||!pass){err.textContent='Enter your email and password.';return}btn.disabled=true;btn.textContent='Logging in…';try{const {data,error}=await sb.auth.signInWithPassword({email,password:pass});if(error)throw error;await enterApp(data.session)}catch(e){console.error(e);err.textContent='Incorrect email or password.'}finally{btn.disabled=false;btn.textContent='Log In'}};$('li-pass').addEventListener('keydown',e=>{if(e.key==='Enter')$('login-btn').click()});
 $('logout').onclick=async()=>{try{await sb.auth.signOut()}catch(e){console.error(e)}if(realtimeChannel){sb.removeChannel(realtimeChannel);realtimeChannel=null}sbUser=null;currentProfile=null;current='';cloudPosts=[];cloudComments=[];cloudLikes=[];cloudSaves=[];$('li-pass').value='';showAuth('login')};
 function go(id){document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===id));document.querySelectorAll('.bottom .nav').forEach(n=>n.classList.toggle('active',n.dataset.go===id));if(id==='community')renderCommunity();if(id==='archive')renderArchive();if(id==='inbox')renderInbox();if(id==='profile')renderProfile();if(id==='map'){renderNetwork();setMapView('map')}if(id==='write'){const u=user();if(u&&u.privacy?.anonymousDefault){const r=document.querySelector('[name=visibility][value=Anonymous]');if(r)r.checked=true;$('future-settings').classList.add('hidden')}}window.scrollTo(0,0)}document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>go(b.dataset.go));
